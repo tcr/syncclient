@@ -1,5 +1,6 @@
 import argparse
-from client import SyncClient, get_browserid_assertion
+import json
+from client import SyncClient, get_browserid_assertion, get_encryption_key, decrypt_data
 from pprint import pprint
 
 
@@ -18,11 +19,16 @@ def main():
                                  if not m.startswith('_')])
 
     args, extra = parser.parse_known_args()
-
+    # for decrypt data, need FxA->KeyB
     bid_assertion_args = get_browserid_assertion(args.login, args.password)
     client = SyncClient(*bid_assertion_args)
-    pprint(getattr(client, args.action)(*extra))
+    encryption_key = get_encryption_key(client, args.login, args.password)
 
+    result = getattr(client, args.action)(*extra)
+    if isinstance(result, list):
+        for item in result:
+            item['payload'] = json.dumps(decrypt_data(encryption_key, item['payload']))
+    pprint(result)
 
 if __name__ == '__main__':
     main()
