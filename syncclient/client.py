@@ -1,5 +1,6 @@
 from hashlib import sha256
 from binascii import hexlify
+from base64 import b64decode
 import json
 import six
 import sys
@@ -7,6 +8,8 @@ import sys
 import requests
 from requests_hawk import HawkAuth
 from fxa.core import Client as FxAClient
+from fxa.crypto import derive_key
+from crypto import AESCipher, KeyBundle
 
 # This is a proof of concept, in python, to get some data of some collections.
 # The data stays encrypted and because we don't have the keys to decrypt it
@@ -28,18 +31,66 @@ def encode_header(value):
         return value.encode('utf-8')
 
 
+class FxAConnection(object):
+    def __new__(cls, login=None, password=None, fxa_server_url=FXA_SERVER_URL):
+        # initial connection or server changed
+        if not cls._client or cls._fxa_server_url != fxa_server_url:
+            if not (login and password):
+                raise TypeError("FxAConnection require both login and password arguments")
+            # new client
+            cls._fxa_server_url = fxa_server_url
+            cls._client = FxAClient(server_url = fxa_server_url)
+            cls._session = None
+        # initial login or re-login
+        if not cls._session or (login and password):
+            if not (login and password):
+                # not login
+                raise TypeError("FxAConnection require both login and password arguments")
+            # initial login
+            cls._session = cls._client.login(login, password, keys = True)
+        elif login or password:
+            raise TypeError("FxAConnection takes both login and password arguments, not login or password only")
+        return cls._session
+
+    _fxa_server_url = None
+    _client = None
+    _session = None
+
+
 def get_browserid_assertion(login, password, fxa_server_url=FXA_SERVER_URL,
                             tokenserver_url=TOKENSERVER_URL):
     """Trade a user and password for a BrowserID assertion and the client
     state.
     """
-    client = FxAClient(server_url=fxa_server_url)
-    session = client.login(login, password, keys=True)
+    session = FxAConnection(login, password, fxa_server_url = fxa_server_url)
     bid_assertion = session.get_identity_assertion(tokenserver_url)
     _, keyB = session.fetch_keys()
     if isinstance(keyB, six.text_type):  # pragma: no cover
         keyB = keyB.encode('utf-8')
     return bid_assertion, hexlify(sha256(keyB).digest()[0:16])
+
+
+def __get_sync_key(login, password):
+    session = FxAConnection(login, password)
+    _, keyB = session.fetch_keys()
+    return keyB
+
+
+def get_encryption_key(client, login, password):
+    keyB = __get_sync_key(login, password)
+
+    # get_encryption key
+    crypto_key = client.get_record(collection = 'crypto', record_id = 'keys')
+
+    sync_key_bundle = derive_key(keyB, b'oldsync', 32 * 2)
+    sync_key_bundle = KeyBundle(key = sync_key_bundle[:32],
+                                hmac_key = sync_key_bundle[32:])
+
+    data = decrypt_data(sync_key_bundle, crypto_key['payload'])
+
+    encryption_key_bundle = KeyBundle(key = b64decode(data['default'][0]),
+                                      hmac_key = b64decode(data['default'][1]))
+    return encryption_key_bundle
 
 
 class SyncClientError(Exception):
@@ -313,3 +364,19 @@ class SyncClient(object):
         number of BSOs per request is 100.
         """
         pass
+
+
+def decrypt_data(encryption_key_bundle, payload):
+    from binascii import unhexlify
+    from base64 import b64decode
+
+    crypted_data = json.loads(payload)
+
+    cipher = AESCipher(key = encryption_key_bundle,
+                       iv = crypted_data['IV'],
+                       HMAC = unhexlify(crypted_data['hmac'])
+                       )
+
+    decrypted_data = cipher.instantdecrypt(b64decode(crypted_data['ciphertext']))
+    return json.loads(decrypted_data.decode())
+
