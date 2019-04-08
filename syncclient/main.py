@@ -28,7 +28,7 @@ def main():
     if isinstance(result, list):
         for item in result:
             item['payload'] = json.dumps(decrypt_data(encryption_key, item['payload']))
-    pprint(result)
+    print(json.dumps(result))
 
 if __name__ == '__main__':
     main()

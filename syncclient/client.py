@@ -309,7 +309,7 @@ class SyncClient(object):
         """
         # XXX: Workaround until request-hawk supports the json parameter. (#17)
         if isinstance(record, six.string_types):
-            record = json.loads(record)
+            record = json.loads(record)[0]
         record = record.copy()
         record_id = record.pop('id')
         headers = {}
